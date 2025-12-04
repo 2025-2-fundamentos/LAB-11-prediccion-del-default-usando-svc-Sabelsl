@@ -95,3 +95,140 @@
 # {'type': 'cm_matrix', 'dataset': 'train', 'true_0': {"predicted_0": 15562, "predicte_1": 666}, 'true_1': {"predicted_0": 3333, "predicted_1": 1444}}
 # {'type': 'cm_matrix', 'dataset': 'test', 'true_0': {"predicted_0": 15562, "predicte_1": 650}, 'true_1': {"predicted_0": 2490, "predicted_1": 1420}}
 #
+
+
+import json
+import gzip
+import pickle
+import pandas as pd
+import numpy as np
+import os
+
+from sklearn.model_selection import GridSearchCV
+from sklearn.compose import ColumnTransformer
+from sklearn.preprocessing import OneHotEncoder, StandardScaler
+from sklearn.pipeline import Pipeline
+from sklearn.svm import SVC
+from sklearn.decomposition import PCA
+from sklearn.feature_selection import SelectKBest, f_classif
+from sklearn.metrics import (
+precision_score,
+balanced_accuracy_score,
+recall_score,
+f1_score,
+confusion_matrix)
+
+df_train = pd.read_csv("files/input/train_data.csv.zip")
+df_test = pd.read_csv("files/input/test_data.csv.zip")
+
+df_train = df_train.rename(columns={"default payment next month": "default"})
+df_test = df_test.rename(columns={"default payment next month": "default"})
+
+df_train = df_train.drop(columns=["ID"])
+df_test = df_test.drop(columns=["ID"])
+
+df_train = df_train.dropna()
+df_test = df_test.dropna()
+
+df_train.loc[df_train["EDUCATION"] > 4, "EDUCATION"] = 4
+df_test.loc[df_test["EDUCATION"] > 4, "EDUCATION"] = 4
+
+# Paso 2
+X_tr = df_train.drop(columns="default")
+y_tr = df_train["default"]
+
+X_te = df_test.drop(columns="default")
+y_te = df_test["default"]
+
+# Paso 3
+cols_cat = ["SEX", "EDUCATION", "MARRIAGE"]
+cols_num = [col for col in X_tr.columns if col not in cols_cat]
+
+transformador = ColumnTransformer(
+    transformers=[
+        ("cat", OneHotEncoder(handle_unknown="ignore"), cols_cat),
+        ("num", StandardScaler(), cols_num),
+    ]
+)
+
+pipeline = Pipeline(
+    steps=[
+        ("prep", transformador),
+        ("pca", PCA()),
+        ("select", SelectKBest(score_func=f_classif)),
+        ("svc", SVC()),
+    ]
+)
+
+# Paso 4
+param_grid = {
+    "pca__n_components": [21],
+    "select__k": [12],
+    "svc__C": [0.8],
+    "svc__kernel": ["rbf"],
+    "svc__gamma": [0.1],
+}
+
+busqueda = GridSearchCV(
+    estimator=pipeline,
+    param_grid=param_grid,
+    cv=10,
+    scoring="balanced_accuracy",
+    n_jobs=-1,
+)
+
+busqueda.fit(X_tr, y_tr)
+
+# Paso 5
+os.makedirs("files/models", exist_ok=True)
+
+with gzip.open("files/models/model.pkl.gz", "wb") as f_modelo:
+    pickle.dump(busqueda, f_modelo)
+
+# Paso 6
+def construir_metricas(nombre, y_real, y_predicho):
+    return {
+        "type": "metrics",
+        "dataset": nombre,
+        "precision": float(round(precision_score(y_real, y_predicho), 3)),
+        "balanced_accuracy": float(
+            round(balanced_accuracy_score(y_real, y_predicho), 3)
+        ),
+        "recall": float(round(recall_score(y_real, y_predicho), 3)),
+        "f1_score": float(round(f1_score(y_real, y_predicho), 3)),
+    }
+
+
+met_train = construir_metricas("train", y_tr, busqueda.predict(X_tr))
+met_test = construir_metricas("test", y_te, busqueda.predict(X_te))
+
+# Paso 7
+def construir_cm(nombre, y_real, y_predicho):
+    tn, fp, fn, tp = confusion_matrix(y_real, y_predicho).ravel()
+    return {
+        "type": "cm_matrix",
+        "dataset": nombre,
+        "true_0": {
+            "predicted_0": int(tn),
+            "predicted_1": int(fp),
+        },
+        "true_1": {
+            "predicted_0": int(fn),
+            "predicted_1": int(tp),
+        },
+    }
+
+
+cm_train = construir_cm("train", y_tr, busqueda.predict(X_tr))
+cm_test = construir_cm("test", y_te, busqueda.predict(X_te))
+
+salida = [met_train, met_test, cm_train, cm_test]
+
+os.makedirs("files/output", exist_ok=True)
+
+with open("files/output/metrics.json", "w") as f_salida:
+    for registro in salida:
+        f_salida.write(json.dumps(registro) + "\n")
+
+
+
